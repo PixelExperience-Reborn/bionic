@@ -1,0 +1,65 @@
+name: Import pinned official AOSP 17 Bionic source
+
+on:
+  push:
+    branches:
+      - ci/a17-bionic-import-20261103
+    paths:
+      - .github/workflows/import-aosp17-bionic.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aosp17-bionic-import
+  cancel-in-progress: false
+
+jobs:
+  source-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AOSP_URL: https://android.googlesource.com/platform/bionic
+      AOSP_REF: refs/tags/android-17.0.0_r1
+      EXPECTED_COMMIT: 06356e41c5ed7b12220b24c05ba4fdb873b126a7
+      EXPECTED_TREE: 31f89de9fffb766531426cc6ea69d20a5c1c8093
+      OUTPUT_BRANCH: port/a17-bionic-aosp17-base-20261103
+    steps:
+      - name: Fetch and check upstream release history
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aosp-bionic"
+          git -C "$RUNNER_TEMP/aosp-bionic" init -q
+          git -C "$RUNNER_TEMP/aosp-bionic" remote add official "$AOSP_URL"
+          # Copy complete history so GitHub can resolve commit parents.
+          git -C "$RUNNER_TEMP/aosp-bionic" fetch --no-tags official "$AOSP_REF"
+          resolved="$(git -C "$RUNNER_TEMP/aosp-bionic" rev-parse 'FETCH_HEAD^{commit}')"
+          tree="$(git -C "$RUNNER_TEMP/aosp-bionic" rev-parse "$resolved^{tree}")"
+          test "$resolved" = "$EXPECTED_COMMIT" || { echo "Wrong AOSP commit: $resolved"; exit 1; }
+          test "$tree" = "$EXPECTED_TREE" || { echo "Wrong AOSP tree: $tree"; exit 1; }
+          git -C "$RUNNER_TEMP/aosp-bionic" fsck --connectivity-only --no-reflogs
+          echo "Verified official AOSP Bionic tag $resolved / tree $tree"
+
+      - name: Publish isolated source branch, never overwrite
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          destination="https://github.com/$GITHUB_REPOSITORY.git"
+          ref="refs/heads/$OUTPUT_BRANCH"
+          current="$(git ls-remote "$destination" "$ref" | cut -f1)"
+          if [[ -n "$current" ]]; then
+            test "$current" = "$EXPECTED_COMMIT" || {
+              echo "Refusing to overwrite existing branch: $current"
+              exit 1
+            }
+            echo "Source branch already pinned to official AOSP."
+            exit 0
+          fi
+          authorization="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -C "$RUNNER_TEMP/aosp-bionic" \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" \
+            push --no-thin "$destination" "$EXPECTED_COMMIT:$ref"
+          echo "Published verified AOSP17 Bionic to $OUTPUT_BRANCH"
